@@ -1,0 +1,171 @@
+include:
+- template: Auto-DevOpsBK.gitlab-ci.yml
+production:
+  extends: ".auto-deploy"
+  stage: production
+  variables:
+    VAULT_SERVER_URL:
+    VAULT_AUTH_PATH:
+    VAULT_AUTH_ROLE:
+    LABEL: kuma.io/sidecar-injection
+    LABEL_VALUE: enabled
+  id_tokens:
+    VAULT_ID_TOKEN:
+      aud: https://gitlabtest.funcionpublica.gob.mx
+  secrets: {}
+  script:
+  - auto-deploy check_kube_domain
+  - auto-deploy download_chart
+  - auto-deploy use_kube_context || true
+  - export KUBE_NAMESPACE=$(echo "$CI_PROJECT_NAME" | tr '[:upper:]' '[:lower:]' )-$CI_PROJECT_ID-$CI_ENVIRONMENT_SLUG
+  - auto-deploy ensure_namespace
+  - auto-deploy initialize_tiller
+  - auto-deploy create_secret
+  - auto-deploy deploy
+  - echo "VALIDACIONES HPA"
+  - |
+    if [ -z "${SFP_HPA:-}" ]; then
+      echo "La variable SFP_HPA no esta definida"
+    else
+      if [ "$SFP_HPA" = "1" ]; then
+          echo "AGREGAR AUTOSCALING SFP_HPA 1"
+          if kubectl get hpa "$CI_ENVIRONMENT_SLUG" -n "$KUBE_NAMESPACE" > /dev/null 2>&1; then
+            echo "El HPA $ENVIRONMENT_SLUG existe en el namespace $KUBE_NAMESPACE";
+            echo "NO SE REALIZAN CAMBIOS...";
+          else
+            echo "El HPA $CI_ENVIRONMENT_SLUG no existe en el namespace $KUBE_NAMESPACE";
+            echo "AGREGANDO...";
+            kubectl autoscale deployment $CI_ENVIRONMENT_SLUG --cpu-percent=$SFP_HPA_PORCENTAJE --min=1 --max=$SFP_HPA_PODS --namespace $KUBE_NAMESPACE;
+          fi
+
+      elif [ "$SFP_HPA" = "2" ]; then
+        echo "BORRAR AGREGAR AUTOSCALING  SFP_HPA 2"
+          if kubectl get hpa "$CI_ENVIRONMENT_SLUG" -n "$KUBE_NAMESPACE" > /dev/null 2>&1; then
+            echo "El HPA $ENVIRONMENT_SLUG existe en el namespace $KUBE_NAMESPACE";
+            echo "BORRANDO...";
+            kubectl delete hpa $CI_ENVIRONMENT_SLUG --namespace $KUBE_NAMESPACE;
+          else
+            echo "El HPA $CI_ENVIRONMENT_SLUG no existe en el namespace $KUBE_NAMESPACE";
+            echo "NO SE REALIZAN CAMBIOS...";
+          fi
+        
+      elif [ "$SFP_HPA" = "3" ]; then
+        echo "EDITAR AUTOSCALING  SFP_HPA 3"
+          if kubectl get hpa "$CI_ENVIRONMENT_SLUG" -n "$KUBE_NAMESPACE" > /dev/null 2>&1; then
+            echo "El HPA $ENVIRONMENT_SLUG existe en el namespace $KUBE_NAMESPACE";
+            kubectl patch hpa $CI_ENVIRONMENT_SLUG -n $KUBE_NAMESPACE -p "{\"spec\":{\"minReplicas\":1,\"maxReplicas\":$SFP_HPA_PODS}}"
+          else
+            echo "El HPA $CI_ENVIRONMENT_SLUG no existe en el namespace $KUBE_NAMESPACE";
+            echo "NO SE REALIZAN CAMBIOS...";
+          fi
+
+      else
+        echo "La variable SFP_HPA tiene un valor diferente de 1, 2 o 3. No se realizaran cambios en las etiquetas."
+      fi
+    fi
+  
+  - echo " FIN VALIDACIONES HPA"
+  - auto-deploy delete canary
+  - auto-deploy persist_environment_url
+
+  environment:
+    name: production
+    url: http://$CI_PROJECT_PATH_SLUG.$KUBE_INGRESS_BASE_DOMAIN
+  artifacts:
+    paths:
+    - environment_url.txt
+    - tiller.log
+    when: always
+  rules:
+  - if: "$CI_DEPLOY_FREEZE"
+    when: never
+  - if: ($CI_KUBERNETES_ACTIVE == null || $CI_KUBERNETES_ACTIVE == "") && ($KUBECONFIG
+      == null || $KUBECONFIG == "")
+    when: never
+  - if: "$STAGING_ENABLED"
+    when: never
+  - if: "$CANARY_ENABLED"
+    when: never
+  - if: "$INCREMENTAL_ROLLOUT_ENABLED"
+    when: never
+  - if: "$INCREMENTAL_ROLLOUT_MODE"
+    when: never
+  - if: "$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH"
+production_manual:
+  extends: ".auto-deploy"
+  stage: production
+  variables:
+    VAULT_SERVER_URL:
+    VAULT_AUTH_PATH:
+    VAULT_AUTH_ROLE:
+  id_tokens:
+    VAULT_ID_TOKEN:
+      aud: https://gitlabtest.funcionpublica.gob.mx
+  secrets: {}
+  script:
+  - auto-deploy check_kube_domain
+  - auto-deploy download_chart
+  - auto-deploy use_kube_context || true
+  - export KUBE_NAMESPACE=$(echo "$CI_PROJECT_NAME" | tr '[:upper:]' '[:lower:]' )-$CI_PROJECT_ID-$CI_ENVIRONMENT_SLUG
+  - auto-deploy ensure_namespace
+  - auto-deploy initialize_tiller
+  - auto-deploy create_secret
+  - echo "INICIA KUMA"
+  - echo "VERIFICANDO SI SE AGREGARA LA ETIQUETA DE KUMA"
+  - |
+    if [ -z "${KUMA:-}" ]; then
+      echo "La variable KUMA no esta definida. No se realizaran cambios en las etiquetas."
+    else
+      echo "Verificando si la etiqueta $LABEL existe en el namespace $KUBE_NAMESPACE."
+      EXISTING_LABEL=$(kubectl get namespace "$KUBE_NAMESPACE" --show-labels | grep "$LABEL" || true)
+      
+      if [ "$KUMA" = "1" ]; then
+        if [ -z "$EXISTING_LABEL" ]; then
+          echo "La etiqueta $LABEL no existe en el namespace $KUBE_NAMESPACE."
+          echo "Agregando etiqueta..."
+          kubectl label namespace "$KUBE_NAMESPACE" "$LABEL=$LABEL_VALUE" --overwrite
+          CHANGES_MADE=true
+        else
+          echo "La etiqueta $LABEL ya esta presente en el namespace $KUBE_NAMESPACE."
+        fi
+      elif [ "$KUMA" = "2" ]; then
+        if [ -n "$EXISTING_LABEL" ]; then
+          echo "Eliminando la etiqueta $LABEL del namespace $KUBE_NAMESPACE."
+          kubectl label namespace "$KUBE_NAMESPACE" "$LABEL-" --overwrite
+          CHANGES_MADE=true
+        else
+          echo "La etiqueta $LABEL no está presente en el namespace $KUBE_NAMESPACE."
+          echo "No se borrará nada."
+        fi
+      else
+        echo "La variable KUMA tiene un valor diferente de 1 o 2. No se realizaran cambios en las etiquetas."
+      fi
+    fi
+#TERMINA SCRIPT DE CREACION DE ETIQUETA 
+  - echo "FIN KUMA"
+  - auto-deploy deploy
+  - auto-deploy delete canary
+  - auto-deploy persist_environment_url
+  environment:
+    name: production
+    url: http://$CI_PROJECT_PATH_SLUG.$KUBE_INGRESS_BASE_DOMAIN
+  artifacts:
+    paths:
+    - environment_url.txt
+    - tiller.log
+    when: always
+  allow_failure: false
+  rules:
+  - if: "$CI_DEPLOY_FREEZE"
+    when: never
+  - if: ($CI_KUBERNETES_ACTIVE == null || $CI_KUBERNETES_ACTIVE == "") && ($KUBECONFIG
+      == null || $KUBECONFIG == "")
+    when: never
+  - if: "$INCREMENTAL_ROLLOUT_ENABLED"
+    when: never
+  - if: "$INCREMENTAL_ROLLOUT_MODE"
+    when: never
+  - if: "$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $STAGING_ENABLED"
+    when: manual
+  - if: "$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CANARY_ENABLED"
+    when: manual
